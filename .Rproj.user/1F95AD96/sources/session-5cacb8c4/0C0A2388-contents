@@ -1,0 +1,255 @@
+
+---
+title: "Breast Cancer Detection using Decision Tree and Random Forest"
+author: "Siddhesh"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+                      fig.align="center")
+set.seed(42)
+```
+
+# 1. Data Collection
+
+This project uses the Breast Cancer Wisconsin Diagnostic dataset.
+It contains measurements computed from digitized images of breast
+mass samples. The objective is to compare a Decision Tree and a
+Random Forest model for classifying the diagnosis as benign or malignant.
+
+```{r packages}
+packages <- c("tidyverse", "caret", "rpart", "rpart.plot",
+              "randomForest", "corrplot", "pROC")
+
+missing_packages <- packages[
+  !vapply(packages, requireNamespace, logical(1), quietly=TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages, repos="https://cloud.r-project.org")
+}
+
+invisible(lapply(packages, library, character.only=TRUE))
+```
+
+```{r load-data}
+raw <- read.csv("data.csv", check.names=TRUE)
+
+cat("Dataset dimensions:", dim(raw), "\n")
+head(raw)
+```
+
+# 2. Data Pre-processing and Wrangling
+
+We remove identifier columns, check for missing values, and convert
+the diagnosis into a factor for classification.
+
+```{r preprocessing}
+names(raw) <- trimws(names(raw))
+
+if (!"diagnosis" %in% names(raw)) {
+  stop("The dataset has no 'diagnosis' column. Check data.csv.")
+}
+
+df <- raw %>%
+  select(-any_of(c("id", "X", "Unnamed: 32"))) %>%
+  mutate(
+    diagnosis = factor(
+      diagnosis,
+      levels=c("B", "M"),
+      labels=c("Benign", "Malignant")
+    )
+  ) %>%
+  filter(!is.na(diagnosis))
+
+cat("Rows and columns after cleaning:", dim(df), "\n")
+cat("Missing values:", sum(is.na(df)), "\n")
+table(df$diagnosis)
+```
+
+```{r missing-values}
+missing_summary <- colSums(is.na(df))
+data.frame(
+  Feature=names(missing_summary),
+  MissingValues=as.integer(missing_summary)
+)
+```
+
+# 3. Exploratory and Inferential Analysis
+
+## 3.1 Distribution of Diagnoses
+
+```{r diagnosis-chart, fig.height=4}
+ggplot(df, aes(x=diagnosis, fill=diagnosis)) +
+  geom_bar() +
+  labs(title="Distribution of Breast Cancer Diagnoses",
+       x="Diagnosis", y="Number of Samples") +
+  theme_minimal() +
+  theme(legend.position="none")
+```
+
+## 3.2 Compare Mean Radius
+
+```{r radius-boxplot, fig.height=4}
+ggplot(df, aes(x=diagnosis, y=radius_mean, fill=diagnosis)) +
+  geom_boxplot() +
+  labs(title="Mean Radius by Diagnosis",
+       x="Diagnosis", y="Mean Radius") +
+  theme_minimal() +
+  theme(legend.position="none")
+```
+
+## 3.3 Correlation Analysis
+
+```{r correlation, fig.height=6}
+mean_features <- df %>% select(ends_with("_mean"))
+cor_matrix <- cor(mean_features, use="complete.obs")
+
+corrplot(cor_matrix, method="color", type="upper",
+         tl.cex=0.7, mar=c(0,0,2,0),
+         title="Correlation Between Mean Features")
+```
+
+## 3.4 Statistical Test
+
+We use a Welch two-sample t-test to compare mean radius between
+the two diagnosis groups.
+
+```{r t-test}
+radius_test <- t.test(radius_mean ~ diagnosis, data=df)
+radius_test
+```
+
+# 4. Model Training
+
+We split the dataset into training and testing sets. The models
+learn from the training data and are evaluated on held-out test data.
+
+```{r train-models}
+idx <- createDataPartition(df$diagnosis, p=0.7, list=FALSE)
+train <- df[idx, ]
+test <- df[-idx, ]
+
+tree <- rpart(diagnosis ~ ., data=train, method="class")
+
+rf <- randomForest(
+  diagnosis ~ ., data=train,
+  ntree=500, importance=TRUE
+)
+
+cat("Training samples:", nrow(train), "\n")
+cat("Testing samples:", nrow(test), "\n")
+```
+
+## 4.1 Decision Tree
+
+```{r decision-tree, fig.height=5}
+rpart.plot(tree, extra=104,
+           main="Decision Tree for Breast Cancer Classification")
+```
+
+# 5. Model Testing and Evaluation
+
+We evaluate both models using a confusion matrix, accuracy,
+sensitivity, and specificity. These are educational model
+evaluation metrics, not clinical validation.
+
+```{r evaluation}
+tree_pred <- predict(tree, test, type="class")
+rf_pred <- predict(rf, test, type="class")
+
+tc <- confusionMatrix(
+  data=tree_pred, reference=test$diagnosis,
+  positive="Malignant"
+)
+
+rc <- confusionMatrix(
+  data=rf_pred, reference=test$diagnosis,
+  positive="Malignant"
+)
+
+cat("Decision Tree confusion matrix:\n")
+print(tc$table)
+
+cat("Random Forest confusion matrix:\n")
+print(rc$table)
+
+metrics <- data.frame(
+  Model=c("Decision Tree", "Random Forest"),
+  Accuracy=c(
+    unname(tc$overall["Accuracy"]),
+    unname(rc$overall["Accuracy"])
+  ),
+  Sensitivity=c(
+    unname(tc$byClass["Sensitivity"]),
+    unname(rc$byClass["Sensitivity"])
+  ),
+  Specificity=c(
+    unname(tc$byClass["Specificity"]),
+    unname(rc$byClass["Specificity"])
+  )
+)
+
+knitr::kable(metrics, digits=3,
+             caption="Comparison of Model Performance")
+```
+
+## 5.1 ROC Curves
+
+```{r roc-curves, fig.height=5}
+tree_prob <- predict(tree, test, type="prob")[, "Malignant"]
+rf_prob <- predict(rf, test, type="prob")[, "Malignant"]
+
+r1 <- roc(test$diagnosis, tree_prob,
+          levels=c("Benign", "Malignant"), quiet=TRUE)
+r2 <- roc(test$diagnosis, rf_prob,
+          levels=c("Benign", "Malignant"), quiet=TRUE)
+
+plot(r1, col="blue", lwd=2,
+     main="ROC Curve Comparison")
+plot(r2, col="red", lwd=2, add=TRUE)
+
+legend("bottomright",
+       legend=c(
+         paste("Decision Tree AUC:", round(as.numeric(auc(r1)), 3)),
+         paste("Random Forest AUC:", round(as.numeric(auc(r2)), 3))
+       ),
+       col=c("blue", "red"), lwd=2)
+```
+
+# 6. Feature Importance
+
+Random Forest estimates which features contribute most to its
+classification decisions.
+
+```{r feature-importance, fig.height=5}
+varImpPlot(rf, n.var=10,
+           main="Top 10 Important Features")
+```
+
+# 7. Conclusion and Limitations
+
+```{r conclusion, results='asis'}
+best_model <- metrics$Model[which.max(metrics$Accuracy)]
+
+cat("Based on the held-out test set, the model with the higher ",
+    "accuracy is **", best_model, "**.\n\n", sep="")
+
+cat("Decision Tree accuracy: ",
+    round(metrics$Accuracy[1] * 100, 2), "%.\n\n", sep="")
+
+cat("Random Forest accuracy: ",
+    round(metrics$Accuracy[2] * 100, 2), "%.\n\n", sep="")
+
+cat("The models were compared using accuracy, sensitivity, ",
+    "specificity, and ROC-AUC. Results depend on the train-test ",
+    "split and dataset.\n\n", sep="")
+
+cat("**Limitations:** This is a small, publicly available dataset. ",
+    "Performance on this dataset does not establish clinical safety ",
+    "or suitability for diagnosing patients.\n", sep="")
+```
